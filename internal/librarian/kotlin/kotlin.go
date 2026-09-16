@@ -184,16 +184,17 @@ type batchEntry struct {
 
 // GenerateLibraries generates Kotlin client libraries using the repository's :generator tool.
 func GenerateLibraries(ctx context.Context, cfg *config.Config, libraries []*config.Library, srcs *sources.Sources) error {
-	var pc *config.Protoc
+	var protocPath string
 	if cfg.Tools != nil && cfg.Tools.Protoc != nil {
-		pc = cfg.Tools.Protoc
+		pc := cfg.Tools.Protoc
 		if err := protoc.Install(ctx, pc); err != nil {
 			return fmt.Errorf("failed to install protoc: %w", err)
 		}
-	}
-	protocPath, err := protoc.BinaryPathOrSystem(pc)
-	if err != nil {
-		return fmt.Errorf("failed to resolve protoc binary: %w", err)
+		var err error
+		protocPath, err = protoc.BinaryPathOrSystem(pc)
+		if err != nil {
+			return fmt.Errorf("failed to resolve protoc binary: %w", err)
+		}
 	}
 
 	generatorBin, err := ensureGeneratorInstalled(ctx)
@@ -324,8 +325,10 @@ func GenerateLibraries(ctx context.Context, cfg *config.Config, libraries []*con
 	}
 
 	args := []string{
-		"--protoc=" + protocPath,
 		"--batch_spec=" + tempFile.Name(),
+	}
+	if protocPath != "" {
+		args = append(args, "--protoc="+protocPath)
 	}
 	return command.RunStreaming(ctx, generatorBin, args...)
 }
