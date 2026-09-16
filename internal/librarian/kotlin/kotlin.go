@@ -24,14 +24,17 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"slices"
 
+	"github.com/googleapis/librarian/internal/cache"
 	"github.com/googleapis/librarian/internal/command"
 	"github.com/googleapis/librarian/internal/config"
 	"github.com/googleapis/librarian/internal/filesystem"
 	"github.com/googleapis/librarian/internal/proto"
 	"github.com/googleapis/librarian/internal/semver"
 	"github.com/googleapis/librarian/internal/sources"
+	"github.com/googleapis/librarian/internal/tool/maven"
 	"github.com/googleapis/librarian/internal/tool/protoc"
 	"github.com/googleapis/librarian/internal/yaml"
 )
@@ -40,7 +43,16 @@ const (
 	defaultGroupID          = "com.google.cloud.kotlin"
 	defaultArtifactIDPrefix = "google-cloud-kotlin-"
 	commonResourcesProto    = "google/cloud/common_resources.proto"
+
+	// grpcPluginTool is the tools.maven entry name that provides the gRPC-Java
+	// protoc plugin. The generator is handed the resulting wrapper script via
+	// --grpc_plugin so the gRPC stubs match the version pinned in librarian.yaml.
+	grpcPluginTool = "protoc-gen-grpc-java"
+	kotlinToolsDir = "kotlin_tools"
 )
+
+// errUnsupportedPlatform indicates the host has no published gRPC-Java plugin build.
+var errUnsupportedPlatform = errors.New("unsupported platform for protoc-gen-grpc-java")
 
 // DefaultOutput derives the default output directory name for a Kotlin library.
 func DefaultOutput(name, defaultOut string) string {
@@ -197,6 +209,11 @@ func GenerateLibraries(ctx context.Context, cfg *config.Config, libraries []*con
 		}
 	}
 
+	grpcPluginPath, err := installGRPCPlugin(ctx, cfg.Tools)
+	if err != nil {
+		return err
+	}
+
 	generatorBin, err := ensureGeneratorInstalled(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to build generator: %w", err)
@@ -330,7 +347,93 @@ func GenerateLibraries(ctx context.Context, cfg *config.Config, libraries []*con
 	if protocPath != "" {
 		args = append(args, "--protoc="+protocPath)
 	}
+	if grpcPluginPath != "" {
+		args = append(args, "--grpc_plugin="+grpcPluginPath)
+	}
 	return command.RunStreaming(ctx, generatorBin, args...)
+}
+
+// installGRPCPlugin installs the gRPC-Java protoc plugin declared under
+// tools.maven and returns the path to its executable wrapper. It returns an
+// empty path when the plugin is not configured, in which case the generator
+// falls back to its own plugin discovery.
+func installGRPCPlugin(ctx context.Context, tools *config.Tools) (string, error) {
+	if tools == nil {
+		return "", nil
+	}
+	var tool *config.MavenTool
+	for _, t := range tools.Maven {
+		if t != nil && t.Name == grpcPluginTool {
+			tool = t
+			break
+		}
+	}
+	if tool == nil {
+		return "", nil
+	}
+	// The plugin is published as a per-platform executable. Deriving the
+	// classifier here keeps librarian.yaml portable across developer machines.
+	resolved := *tool
+	if resolved.Classifier == "" {
+		classifier, err := grpcPluginClassifier()
+		if err != nil {
+			return "", err
+		}
+		resolved.Classifier = classifier
+	}
+
+	binDir, libDir, err := kotlinToolDirs()
+	if err != nil {
+		return "", err
+	}
+	for _, dir := range []string{binDir, libDir} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return "", fmt.Errorf("failed to create tool directory %q: %w", dir, err)
+		}
+	}
+	if err := maven.Install(ctx, []*config.MavenTool{&resolved}, binDir, libDir); err != nil {
+		return "", fmt.Errorf("failed to install %s: %w", grpcPluginTool, err)
+	}
+	return filepath.Join(binDir, resolved.Name), nil
+}
+
+// grpcPluginClassifier maps the current platform onto the Maven classifier used
+// by io.grpc:protoc-gen-grpc-java releases.
+func grpcPluginClassifier() (string, error) {
+	var goos string
+	switch runtime.GOOS {
+	case "darwin":
+		goos = "osx"
+	case "linux":
+		goos = "linux"
+	case "windows":
+		goos = "windows"
+	default:
+		return "", fmt.Errorf("%w: %s", errUnsupportedPlatform, runtime.GOOS)
+	}
+	var goarch string
+	switch runtime.GOARCH {
+	case "amd64":
+		goarch = "x86_64"
+	case "arm64":
+		goarch = "aarch_64"
+	default:
+		return "", fmt.Errorf("%w: %s", errUnsupportedPlatform, runtime.GOARCH)
+	}
+	return goos + "-" + goarch, nil
+}
+
+// kotlinToolDirs returns the bin and lib directories for Kotlin tool installs.
+func kotlinToolDirs() (string, string, error) {
+	base, err := cache.BinDirectory()
+	if err != nil {
+		return "", "", err
+	}
+	installDir, err := filepath.Abs(filepath.Join(base, kotlinToolsDir))
+	if err != nil {
+		return "", "", err
+	}
+	return filepath.Join(installDir, "bin"), filepath.Join(installDir, "lib"), nil
 }
 
 func ensureGeneratorInstalled(ctx context.Context) (string, error) {

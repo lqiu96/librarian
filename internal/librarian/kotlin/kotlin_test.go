@@ -17,6 +17,7 @@ package kotlin
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
@@ -164,4 +165,40 @@ func TestClean(t *testing.T) {
 		t.Errorf("expected %s to be preserved, got err: %v", testFile, err)
 	}
 	_ = cmp.Diff("", "")
+}
+
+func TestInstallGRPCPluginNotConfigured(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		tools *config.Tools
+	}{
+		{name: "nil tools", tools: nil},
+		{name: "no maven tools", tools: &config.Tools{}},
+		{
+			name: "unrelated maven tool",
+			tools: &config.Tools{
+				Maven: []*config.MavenTool{{Name: "google-java-format"}},
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got, err := installGRPCPlugin(t.Context(), test.tools)
+			if err != nil {
+				t.Fatalf("installGRPCPlugin() unexpected error: %v", err)
+			}
+			if got != "" {
+				t.Errorf("installGRPCPlugin() = %q, want empty", got)
+			}
+		})
+	}
+}
+
+func TestGRPCPluginClassifier(t *testing.T) {
+	got, err := grpcPluginClassifier()
+	if err != nil {
+		t.Skipf("unsupported test platform: %v", err)
+	}
+	if !strings.Contains(got, "-") {
+		t.Errorf("grpcPluginClassifier() = %q, want <os>-<arch>", got)
+	}
 }
