@@ -16,6 +16,7 @@
 package kotlin
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,6 +27,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 
 	"github.com/googleapis/librarian/internal/cache"
 	"github.com/googleapis/librarian/internal/command"
@@ -192,6 +194,31 @@ type batchEntry struct {
 	IncludeDirs          []string `json:"includeDirs"`
 	ProtoFiles           []string `json:"protoFiles"`
 	AdditionalProtoFiles []string `json:"additionalProtoFiles"`
+	ServiceYamlFiles     []string `json:"serviceYamlFiles"`
+}
+
+// findServiceYamls returns the google.api.Service configuration files in dir. These carry the
+// mixin API list and the per-service http rule overrides that the protos themselves do not declare.
+func findServiceYamls(dir string) []string {
+	dirEntries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var found []string
+	for _, e := range dirEntries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".yaml") {
+			continue
+		}
+		p := filepath.Join(dir, e.Name())
+		data, err := os.ReadFile(p)
+		if err != nil {
+			continue
+		}
+		if bytes.Contains(data, []byte("type: google.api.Service")) {
+			found = append(found, p)
+		}
+	}
+	return found
 }
 
 // GenerateLibraries generates Kotlin client libraries using the repository's :generator tool.
@@ -245,6 +272,8 @@ func GenerateLibraries(ctx context.Context, cfg *config.Config, libraries []*con
 		protoFiles := []string{}
 		additionalProtoFiles := []string{}
 		additionalSeen := make(map[string]bool)
+		serviceYamlFiles := []string{}
+		serviceYamlSeen := make(map[string]bool)
 
 		for _, api := range library.APIs {
 			if api.Java != nil && api.Java.GenerateGAPIC != nil && !*api.Java.GenerateGAPIC {
@@ -262,6 +291,13 @@ func GenerateLibraries(ctx context.Context, cfg *config.Config, libraries []*con
 				apiProtos = filterProtos(apiProtos, api.Java.ExcludedProtos, primaryDir)
 			}
 			protoFiles = append(protoFiles, apiProtos...)
+
+			for _, y := range findServiceYamls(apiDir) {
+				if !serviceYamlSeen[y] {
+					serviceYamlSeen[y] = true
+					serviceYamlFiles = append(serviceYamlFiles, y)
+				}
+			}
 
 			for _, p := range apiProtos {
 				if rel, relErr := filepath.Rel(primaryDir, p); relErr == nil {
@@ -320,6 +356,7 @@ func GenerateLibraries(ctx context.Context, cfg *config.Config, libraries []*con
 			IncludeDirs:          includeDirs,
 			ProtoFiles:           protoFiles,
 			AdditionalProtoFiles: additionalProtoFiles,
+			ServiceYamlFiles:     serviceYamlFiles,
 		})
 	}
 
