@@ -35,6 +35,8 @@ const (
 	LanguageGo = "go"
 	// LanguageJava is the language identifier for Java.
 	LanguageJava = "java"
+	// LanguageKotlin is the language identifier for Kotlin.
+	LanguageKotlin = "kotlin"
 	// LanguageNodejs is the language identifier for Node.js.
 	LanguageNodejs = "nodejs"
 	// LanguagePhp is the language identifier for PHP.
@@ -508,6 +510,8 @@ type JavaDefault struct {
 	// Use this to override the default "com.google.cloud" Group ID for specific API
 	// paths (e.g., maps, ads, shopping).
 	CustomGroupIDs map[string]string `yaml:"custom_group_ids,omitempty"`
+	// GroupID overrides the default Maven/Gradle Group ID (e.g., "com.google.cloud.kotlin").
+	GroupID string `yaml:"group_id,omitempty"`
 	// LibrariesBOMVersion is the version of the libraries-bom to use for Java.
 	// This must be set in the default configuration.
 	LibrariesBOMVersion string `yaml:"libraries_bom_version,omitempty"`

@@ -25,6 +25,7 @@ import (
 	"github.com/googleapis/librarian/internal/config"
 	"github.com/googleapis/librarian/internal/librarian/golang"
 	"github.com/googleapis/librarian/internal/librarian/java"
+	"github.com/googleapis/librarian/internal/librarian/kotlin"
 	"github.com/googleapis/librarian/internal/librarian/nodejs"
 	"github.com/googleapis/librarian/internal/librarian/php"
 	"github.com/googleapis/librarian/internal/librarian/python"
@@ -158,9 +159,9 @@ func validateLibraries(cfg *config.Config) error {
 	for path, count := range pathCount {
 		// Relax unique API path validation for Ruby because wrapper libraries share
 		// API paths with the versioned libraries they wrap.
-		// Relax unique API path validation for Java here and validate in Java
+		// Relax unique API path validation for Java/Kotlin here and validate in
 		// language validation because some specific paths are intentionally duplicated.
-		if count > 1 && cfg.Language != config.LanguageRuby && cfg.Language != config.LanguageJava {
+		if count > 1 && cfg.Language != config.LanguageRuby && cfg.Language != config.LanguageJava && cfg.Language != config.LanguageKotlin {
 			errs = append(errs, fmt.Errorf("%w: %s (appears %d times)", errDuplicateAPIPath, path, count))
 		}
 	}
@@ -176,8 +177,9 @@ func validateLibraries(cfg *config.Config) error {
 // languageValidators maps a language to a function that validates the language-specific
 // configuration.
 var languageValidators = map[string]func(*config.Config) error{
-	config.LanguageJava: java.Validate,
-	config.LanguagePhp:  php.Validate,
+	config.LanguageJava:   java.Validate,
+	config.LanguageKotlin: kotlin.Validate,
+	config.LanguagePhp:    php.Validate,
 }
 
 // validateLanguageConfig finds and executes the language-specific validator for a library.
@@ -192,6 +194,7 @@ func validateLanguageConfig(cfg *config.Config) error {
 // configuration.
 var languageTidiers = map[string]func(*config.Library) (*config.Library, error){
 	config.LanguageJava:   java.Tidy,
+	config.LanguageKotlin: kotlin.Tidy,
 	config.LanguageNodejs: nodejs.Tidy,
 	config.LanguagePhp:    php.Tidy,
 	config.LanguagePython: python.Tidy,

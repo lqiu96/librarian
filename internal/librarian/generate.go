@@ -25,6 +25,7 @@ import (
 	"github.com/googleapis/librarian/internal/librarian/dart"
 	"github.com/googleapis/librarian/internal/librarian/golang"
 	"github.com/googleapis/librarian/internal/librarian/java"
+	"github.com/googleapis/librarian/internal/librarian/kotlin"
 	"github.com/googleapis/librarian/internal/librarian/nodejs"
 	"github.com/googleapis/librarian/internal/librarian/php"
 	"github.com/googleapis/librarian/internal/librarian/python"
@@ -159,6 +160,8 @@ func cleanLibraries(language string, libraries []*config.Library) error {
 			err = golang.Clean(library)
 		case config.LanguageJava:
 			err = java.Clean(library)
+		case config.LanguageKotlin:
+			err = kotlin.Clean(library)
 		case config.LanguageNodejs:
 			err = nodejs.Clean(library)
 		case config.LanguagePhp:
@@ -250,6 +253,8 @@ func generateLibraries(ctx context.Context, cfg *config.Config, libraries []*con
 			return fmt.Errorf("format java libraries (%s): %w", cfg.Language, err)
 		}
 		return java.PostGenerate(ctx, ".", cfg)
+	case config.LanguageKotlin:
+		return kotlin.GenerateLibraries(ctx, cfg, libraries, src)
 	case config.LanguageNodejs:
 		g, gctx := errgroup.WithContext(ctx)
 		g.SetLimit(runtime.NumCPU())
@@ -366,6 +371,8 @@ func defaultOutput(language string, name, api, defaultOut string) string {
 		return golang.DefaultOutput(name, defaultOut)
 	case config.LanguageJava:
 		return java.DefaultOutput(name, defaultOut)
+	case config.LanguageKotlin:
+		return kotlin.DefaultOutput(name, defaultOut)
 	case config.LanguageNodejs:
 		return nodejs.DefaultOutput(name, defaultOut)
 	case config.LanguagePhp:

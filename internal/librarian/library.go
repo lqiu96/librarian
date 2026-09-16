@@ -23,6 +23,7 @@ import (
 	"github.com/googleapis/librarian/internal/config"
 	"github.com/googleapis/librarian/internal/librarian/golang"
 	"github.com/googleapis/librarian/internal/librarian/java"
+	"github.com/googleapis/librarian/internal/librarian/kotlin"
 	"github.com/googleapis/librarian/internal/librarian/nodejs"
 	"github.com/googleapis/librarian/internal/librarian/php"
 	"github.com/googleapis/librarian/internal/librarian/python"
@@ -337,7 +338,7 @@ func applyDefaults(language string, lib *config.Library, defaults *config.Defaul
 // derive the API path.
 func canDeriveAPIPath(language string) bool {
 	switch language {
-	case config.LanguageGo, config.LanguagePython, config.LanguageNodejs, config.LanguageJava, config.LanguagePhp, config.LanguageRuby:
+	case config.LanguageGo, config.LanguagePython, config.LanguageNodejs, config.LanguageJava, config.LanguageKotlin, config.LanguagePhp, config.LanguageRuby:
 		return false
 	default:
 		return true
@@ -363,6 +364,8 @@ func fillLibraryDefaults(language string, lib *config.Library) (*config.Library,
 		return golang.Fill(lib)
 	case config.LanguageJava:
 		return java.Fill(lib)
+	case config.LanguageKotlin:
+		return kotlin.Fill(lib)
 	case config.LanguagePhp:
 		return php.Fill(lib), nil
 	case config.LanguagePython:
@@ -431,7 +434,7 @@ func resolvePreview(lib *config.Library, language string) *config.Library {
 		res.Dart = mergeDart(res.Dart, p.Dart)
 	case config.LanguageGo:
 		res.Go = mergeGo(res.Go, p.Go)
-	case config.LanguageJava:
+	case config.LanguageJava, config.LanguageKotlin:
 		res.Java = mergeJava(res.Java, p.Java)
 	case config.LanguageNodejs:
 		res.Nodejs = mergeNodejs(res.Nodejs, p.Nodejs)
