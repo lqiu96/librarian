@@ -110,12 +110,13 @@ func TestClean(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(kotlinDir, "Client.kt"), []byte("class Client"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	buildFile := filepath.Join(libDir, "build.gradle.kts")
-	if err := os.WriteFile(buildFile, []byte("plugins {}"), 0644); err != nil {
+	javaDir := filepath.Join(libDir, "src", "main", "java", "com", "example")
+	if err := os.MkdirAll(javaDir, 0755); err != nil {
 		t.Fatal(err)
 	}
-
-	// Preserved directories & files (proto and test)
+	if err := os.WriteFile(filepath.Join(javaDir, "ServiceGrpc.java"), []byte("class ServiceGrpc"), 0644); err != nil {
+		t.Fatal(err)
+	}
 	protoDir := filepath.Join(libDir, "src", "main", "proto")
 	if err := os.MkdirAll(protoDir, 0755); err != nil {
 		t.Fatal(err)
@@ -124,6 +125,12 @@ func TestClean(t *testing.T) {
 	if err := os.WriteFile(protoFile, []byte("syntax = \"proto3\";"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	buildFile := filepath.Join(libDir, "build.gradle.kts")
+	if err := os.WriteFile(buildFile, []byte("plugins {}"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Preserved directories & files (test)
 	testDir := filepath.Join(libDir, "src", "test", "kotlin")
 	if err := os.MkdirAll(testDir, 0755); err != nil {
 		t.Fatal(err)
@@ -144,11 +151,14 @@ func TestClean(t *testing.T) {
 	if _, err := os.Stat(kotlinDir); !os.IsNotExist(err) {
 		t.Errorf("expected %s to be removed", kotlinDir)
 	}
+	if _, err := os.Stat(javaDir); !os.IsNotExist(err) {
+		t.Errorf("expected %s to be removed", javaDir)
+	}
+	if _, err := os.Stat(protoFile); !os.IsNotExist(err) {
+		t.Errorf("expected %s to be removed", protoFile)
+	}
 	if _, err := os.Stat(buildFile); !os.IsNotExist(err) {
 		t.Errorf("expected %s to be removed", buildFile)
-	}
-	if _, err := os.Stat(protoFile); err != nil {
-		t.Errorf("expected %s to be preserved, got err: %v", protoFile, err)
 	}
 	if _, err := os.Stat(testFile); err != nil {
 		t.Errorf("expected %s to be preserved, got err: %v", testFile, err)

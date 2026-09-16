@@ -139,8 +139,8 @@ func Validate(cfg *config.Config) error {
 	return nil
 }
 
-// Clean removes generated Kotlin source files and build.gradle.kts in the library's output directory,
-// while preserving src/main/proto and src/test directories.
+// Clean removes generated Kotlin/Java/proto files and build.gradle.kts in the library's output directory,
+// while preserving src/test and any paths in library.Keep.
 func Clean(library *config.Library) error {
 	outDir := library.Output
 	if outDir == "" {
@@ -151,11 +151,13 @@ func Clean(library *config.Library) error {
 		keepSet[filepath.ToSlash(k)] = true
 	}
 
-	kotlinSrcDir := filepath.Join(outDir, "src", "main", "kotlin")
-	if _, err := os.Stat(kotlinSrcDir); err == nil {
-		if !keepSet["src/main/kotlin"] {
-			if err := os.RemoveAll(kotlinSrcDir); err != nil {
-				return fmt.Errorf("failed to remove %s: %w", kotlinSrcDir, err)
+	for _, relDir := range []string{"src/main/kotlin", "src/main/java", "src/main/proto"} {
+		dirPath := filepath.Join(outDir, filepath.FromSlash(relDir))
+		if _, err := os.Stat(dirPath); err == nil {
+			if !keepSet[relDir] {
+				if err := os.RemoveAll(dirPath); err != nil {
+					return fmt.Errorf("failed to remove %s: %w", dirPath, err)
+				}
 			}
 		}
 	}
@@ -174,6 +176,7 @@ func Clean(library *config.Library) error {
 type batchEntry struct {
 	Name                 string   `json:"name"`
 	OutputDir            string   `json:"outputDir"`
+	JavaOutputDir        string   `json:"javaOutputDir"`
 	IncludeDirs          []string `json:"includeDirs"`
 	ProtoFiles           []string `json:"protoFiles"`
 	AdditionalProtoFiles []string `json:"additionalProtoFiles"`
@@ -221,11 +224,6 @@ func GenerateLibraries(ctx context.Context, cfg *config.Config, libraries []*con
 		}
 
 		protoSrcDir := filepath.Join(outdir, "src", "main", "proto")
-		hasLocalProtoDir := false
-		if st, statErr := os.Stat(protoSrcDir); statErr == nil && st.IsDir() {
-			hasLocalProtoDir = true
-		}
-
 		protoFiles := []string{}
 		additionalProtoFiles := []string{}
 		additionalSeen := make(map[string]bool)
@@ -247,13 +245,11 @@ func GenerateLibraries(ctx context.Context, cfg *config.Config, libraries []*con
 			}
 			protoFiles = append(protoFiles, apiProtos...)
 
-			if hasLocalProtoDir {
-				for _, p := range apiProtos {
-					if rel, relErr := filepath.Rel(primaryDir, p); relErr == nil {
-						destProto := filepath.Join(protoSrcDir, rel)
-						if mkErr := os.MkdirAll(filepath.Dir(destProto), 0o755); mkErr == nil {
-							_ = filesystem.CopyFile(p, destProto)
-						}
+			for _, p := range apiProtos {
+				if rel, relErr := filepath.Rel(primaryDir, p); relErr == nil {
+					destProto := filepath.Join(protoSrcDir, rel)
+					if mkErr := os.MkdirAll(filepath.Dir(destProto), 0o755); mkErr == nil {
+						_ = filesystem.CopyFile(p, destProto)
 					}
 				}
 			}
@@ -274,11 +270,22 @@ func GenerateLibraries(ctx context.Context, cfg *config.Config, libraries []*con
 						continue
 					}
 					addPath := filepath.Join(googleapisDir, filepath.FromSlash(addProto.Path))
-					if !additionalSeen[addPath] {
-						if _, statErr := os.Stat(addPath); statErr == nil {
-							additionalSeen[addPath] = true
-							additionalProtoFiles = append(additionalProtoFiles, addPath)
+					if _, statErr := os.Stat(addPath); statErr != nil {
+						continue
+					}
+					if addProto.GenerateProtoClasses || addProto.CopyToOutput {
+						if rel, relErr := filepath.Rel(googleapisDir, addPath); relErr == nil {
+							destProto := filepath.Join(protoSrcDir, rel)
+							if mkErr := os.MkdirAll(filepath.Dir(destProto), 0o755); mkErr == nil {
+								_ = filesystem.CopyFile(addPath, destProto)
+							}
 						}
+					}
+					if addProto.GenerateProtoClasses {
+						protoFiles = append(protoFiles, addPath)
+					} else if !additionalSeen[addPath] {
+						additionalSeen[addPath] = true
+						additionalProtoFiles = append(additionalProtoFiles, addPath)
 					}
 				}
 			}
@@ -291,6 +298,7 @@ func GenerateLibraries(ctx context.Context, cfg *config.Config, libraries []*con
 		entries = append(entries, batchEntry{
 			Name:                 library.Name,
 			OutputDir:            filepath.Join(outdir, "src", "main", "kotlin"),
+			JavaOutputDir:        filepath.Join(outdir, "src", "main", "java"),
 			IncludeDirs:          includeDirs,
 			ProtoFiles:           protoFiles,
 			AdditionalProtoFiles: additionalProtoFiles,
