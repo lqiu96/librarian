@@ -276,9 +276,6 @@ func GenerateLibraries(ctx context.Context, cfg *config.Config, libraries []*con
 		serviceYamlSeen := make(map[string]bool)
 
 		for _, api := range library.APIs {
-			if api.Java != nil && api.Java.GenerateGAPIC != nil && !*api.Java.GenerateGAPIC {
-				continue
-			}
 			apiDir := filepath.Join(primaryDir, api.Path)
 			apiProtos, err := proto.Gather(apiDir, api.Path)
 			if errors.Is(err, fs.ErrNotExist) {
