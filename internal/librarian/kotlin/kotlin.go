@@ -23,11 +23,13 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path"
 	"path/filepath"
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 
 	"github.com/googleapis/librarian/internal/cache"
 	"github.com/googleapis/librarian/internal/command"
@@ -39,6 +41,8 @@ import (
 	"github.com/googleapis/librarian/internal/tool/maven"
 	"github.com/googleapis/librarian/internal/tool/protoc"
 	"github.com/googleapis/librarian/internal/yaml"
+	goproto "google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/descriptorpb"
 )
 
 const (
@@ -47,11 +51,34 @@ const (
 	commonResourcesProto    = "google/cloud/common_resources.proto"
 
 	// grpcPluginTool is the tools.maven entry name that provides the gRPC-Java
-	// protoc plugin. The generator is handed the resulting wrapper script via
-	// --grpc_plugin so the gRPC stubs match the version pinned in librarian.yaml.
+	// protoc plugin.
 	grpcPluginTool = "protoc-gen-grpc-java"
 	kotlinToolsDir = "kotlin_tools"
 )
+
+// commonProtoDirs lists standard protobuf directories whose compiled Java
+// classes are already provided on every client module's classpath by
+// protobuf-java, :clients:common-protos, :clients:common-iam, or :clients:common-grpc.
+var commonProtoDirs = map[string]bool{
+	"google/protobuf":          true,
+	"google/protobuf/compiler": true,
+	"google/api":               true,
+	"google/rpc":               true,
+	"google/rpc/context":       true,
+	"google/type":              true,
+	"google/geo/type":          true,
+	"google/logging/type":      true,
+	"google/shopping/type":     true,
+	"google/cloud/audit":       true,
+	"google/apps/card/v1":      true,
+	"google/iam/v1":            true,
+	"google/iam/v2":            true,
+	"google/iam/v2beta":        true,
+	"google/iam/v3":            true,
+	"google/iam/v3beta":        true,
+	"google/longrunning":       true,
+	"google/cloud/location":    true,
+}
 
 // errUnsupportedPlatform indicates the host has no published gRPC-Java plugin build.
 var errUnsupportedPlatform = errors.New("unsupported platform for protoc-gen-grpc-java")
@@ -191,6 +218,7 @@ type batchEntry struct {
 	Name                 string   `json:"name"`
 	OutputDir            string   `json:"outputDir"`
 	JavaOutputDir        string   `json:"javaOutputDir"`
+	DescriptorSetFile    string   `json:"descriptorSetFile"`
 	IncludeDirs          []string `json:"includeDirs"`
 	ProtoFiles           []string `json:"protoFiles"`
 	AdditionalProtoFiles []string `json:"additionalProtoFiles"`
@@ -221,9 +249,11 @@ func findServiceYamls(dir string) []string {
 	return found
 }
 
-// GenerateLibraries generates Kotlin client libraries using the repository's :generator tool.
+// GenerateLibraries compiles protobuf descriptors and Java/gRPC wire classes in parallel via protoc,
+// then invokes the repository's :generator tool in a single JVM batch run.
 func GenerateLibraries(ctx context.Context, cfg *config.Config, libraries []*config.Library, srcs *sources.Sources) error {
-	var protocPath string
+	protocPath := "protoc"
+	var protocIncludeDir string
 	if cfg.Tools != nil && cfg.Tools.Protoc != nil {
 		pc := cfg.Tools.Protoc
 		if err := protoc.Install(ctx, pc); err != nil {
@@ -233,6 +263,14 @@ func GenerateLibraries(ctx context.Context, cfg *config.Config, libraries []*con
 		protocPath, err = protoc.BinaryPathOrSystem(pc)
 		if err != nil {
 			return fmt.Errorf("failed to resolve protoc binary: %w", err)
+		}
+		if pc.Version != "" {
+			if installDir, dirErr := protoc.InstallDir(pc.Version); dirErr == nil {
+				inc := filepath.Join(installDir, "include")
+				if st, statErr := os.Stat(inc); statErr == nil && st.IsDir() {
+					protocIncludeDir = inc
+				}
+			}
 		}
 	}
 
@@ -246,8 +284,14 @@ func GenerateLibraries(ctx context.Context, cfg *config.Config, libraries []*con
 		return fmt.Errorf("failed to build generator: %w", err)
 	}
 
+	tempDescRoot, err := os.MkdirTemp("", "librarian-kotlin-desc-*")
+	if err != nil {
+		return fmt.Errorf("failed to create temporary descriptor directory: %w", err)
+	}
+	defer os.RemoveAll(tempDescRoot)
+
 	var entries []batchEntry
-	for _, library := range libraries {
+	for idx, library := range libraries {
 		outdir, err := filepath.Abs(library.Output)
 		if err != nil {
 			return fmt.Errorf("failed to resolve output directory for %s: %w", library.Name, err)
@@ -266,6 +310,9 @@ func GenerateLibraries(ctx context.Context, cfg *config.Config, libraries []*con
 		includeDirs := []string{}
 		for _, root := range srcCfg.ActiveRoots {
 			includeDirs = append(includeDirs, srcCfg.Root(root))
+		}
+		if protocIncludeDir != "" {
+			includeDirs = append(includeDirs, protocIncludeDir)
 		}
 
 		protoSrcDir := filepath.Join(outdir, "src", "main", "proto")
@@ -346,10 +393,12 @@ func GenerateLibraries(ctx context.Context, cfg *config.Config, libraries []*con
 			continue
 		}
 
+		descFile := filepath.Join(tempDescRoot, fmt.Sprintf("%d_%s_descriptor_set.pb", idx, library.Name))
 		entries = append(entries, batchEntry{
 			Name:                 library.Name,
 			OutputDir:            filepath.Join(outdir, "src", "main", "kotlin"),
 			JavaOutputDir:        filepath.Join(outdir, "src", "main", "java"),
+			DescriptorSetFile:    descFile,
 			IncludeDirs:          includeDirs,
 			ProtoFiles:           protoFiles,
 			AdditionalProtoFiles: additionalProtoFiles,
@@ -359,6 +408,10 @@ func GenerateLibraries(ctx context.Context, cfg *config.Config, libraries []*con
 
 	if len(entries) == 0 {
 		return nil
+	}
+
+	if err := runBatchProtoc(ctx, entries, protocPath, grpcPluginPath); err != nil {
+		return err
 	}
 
 	tempFile, err := os.CreateTemp("", "librarian-kotlin-batch-*.json")
@@ -375,16 +428,222 @@ func GenerateLibraries(ctx context.Context, cfg *config.Config, libraries []*con
 		return fmt.Errorf("failed to write batch spec file: %w", err)
 	}
 
-	args := []string{
-		"--batch_spec=" + tempFile.Name(),
+	return command.RunStreaming(ctx, generatorBin, "--batch_spec="+tempFile.Name())
+}
+
+// runBatchProtoc executes protoc across all batch entries using a bounded worker pool.
+func runBatchProtoc(ctx context.Context, entries []batchEntry, protocPath, grpcPluginPath string) error {
+	workers := max(runtime.NumCPU(), 1)
+	sem := make(chan struct{}, workers)
+	var wg sync.WaitGroup
+	errs := make([]error, len(entries))
+
+	for i, entry := range entries {
+		wg.Add(1)
+		go func(idx int, e batchEntry) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			if err := compileEntryProtos(ctx, e, protocPath, grpcPluginPath); err != nil {
+				errs[idx] = fmt.Errorf("protoc failed for library %s: %w", e.Name, err)
+			}
+		}(i, entry)
 	}
-	if protocPath != "" {
-		args = append(args, "--protoc="+protocPath)
+	wg.Wait()
+	return errors.Join(errs...)
+}
+
+// compileEntryProtos compiles the Java/gRPC wire classes into e.JavaOutputDir (strictly for e.ProtoFiles
+// plus any non-common transitive imports) and the full FileDescriptorSet into e.DescriptorSetFile
+// (including e.AdditionalProtoFiles such as mixin protos and common_resources.proto).
+func compileEntryProtos(ctx context.Context, e batchEntry, protocPath, grpcPluginPath string) error {
+	distinctProtos := uniqueCanonicalPaths(e.ProtoFiles)
+	allDescProtos := uniqueCanonicalPaths(append(append([]string{}, distinctProtos...), e.AdditionalProtoFiles...))
+	includeDirs := uniqueCanonicalPaths(e.IncludeDirs)
+
+	buildBaseArgs := func() []string {
+		var args []string
+		for _, inc := range includeDirs {
+			if st, err := os.Stat(inc); err == nil && st.IsDir() {
+				args = append(args, "-I", inc)
+			}
+		}
+		args = append(args, "--experimental_allow_proto3_optional")
+		return args
 	}
-	if grpcPluginPath != "" {
-		args = append(args, "--grpc_plugin="+grpcPluginPath)
+
+	addWireArgs := func(args []string, outDir string) []string {
+		if grpcPluginPath != "" {
+			if _, err := os.Stat(grpcPluginPath); err == nil {
+				args = append(args,
+					"--plugin=protoc-gen-grpc-java="+grpcPluginPath,
+					"--grpc-java_out="+outDir,
+				)
+			}
+		}
+		return append(args, "--java_out="+outDir)
 	}
-	return command.RunStreaming(ctx, generatorBin, args...)
+
+	addDescArgs := func(args []string, descOut string) []string {
+		return append(args,
+			"--descriptor_set_out="+descOut,
+			"--include_imports",
+			"--include_source_info",
+		)
+	}
+
+	runCmd := func(args []string) error {
+		cmd := exec.CommandContext(ctx, protocPath, args...)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("%w: %s", err, strings.TrimSpace(string(out)))
+		}
+		return nil
+	}
+
+	if err := os.MkdirAll(filepath.Dir(e.DescriptorSetFile), 0o755); err != nil {
+		return err
+	}
+
+	if e.JavaOutputDir != "" && len(distinctProtos) > 0 {
+		if err := os.MkdirAll(e.JavaOutputDir, 0o755); err != nil {
+			return err
+		}
+		wireArgs := addWireArgs(buildBaseArgs(), e.JavaOutputDir)
+		if len(e.AdditionalProtoFiles) == 0 {
+			wireArgs = addDescArgs(wireArgs, e.DescriptorSetFile)
+			wireArgs = append(wireArgs, distinctProtos...)
+			if err := runCmd(wireArgs); err != nil {
+				return err
+			}
+			return compileExtraNonCommonImports(e.DescriptorSetFile, distinctProtos, includeDirs, e.JavaOutputDir, buildBaseArgs, runCmd)
+		}
+		wireArgs = append(wireArgs, distinctProtos...)
+		if err := runCmd(wireArgs); err != nil {
+			return err
+		}
+	}
+
+	descArgs := addDescArgs(buildBaseArgs(), e.DescriptorSetFile)
+	descArgs = append(descArgs, allDescProtos...)
+	if err := runCmd(descArgs); err != nil {
+		return err
+	}
+	if e.JavaOutputDir != "" && len(distinctProtos) > 0 {
+		return compileExtraNonCommonImports(e.DescriptorSetFile, distinctProtos, includeDirs, e.JavaOutputDir, buildBaseArgs, runCmd)
+	}
+	return nil
+}
+
+func compileExtraNonCommonImports(
+	descFile string,
+	ownProtos []string,
+	includeDirs []string,
+	javaOutDir string,
+	buildBaseArgs func() []string,
+	runCmd func([]string) error,
+) error {
+	extra := resolveNonCommonImportedProtos(descFile, ownProtos, includeDirs)
+	if len(extra) == 0 {
+		return nil
+	}
+	args := append(buildBaseArgs(), "--java_out="+javaOutDir)
+	args = append(args, extra...)
+	return runCmd(args)
+}
+
+// resolveNonCommonImportedProtos inspects descFile and returns absolute paths for any transitive
+// .proto imports of ownProtos that are not in ownProtos or commonProtoDirs.
+func resolveNonCommonImportedProtos(descFile string, ownProtos []string, includeDirs []string) []string {
+	raw, err := os.ReadFile(descFile)
+	if err != nil {
+		return nil
+	}
+	var descSet descriptorpb.FileDescriptorSet
+	if err := goproto.Unmarshal(raw, &descSet); err != nil {
+		return nil
+	}
+
+	normOwnPaths := make([]string, 0, len(ownProtos))
+	for _, p := range ownProtos {
+		if abs, err := filepath.EvalSymlinks(p); err == nil {
+			normOwnPaths = append(normOwnPaths, filepath.ToSlash(abs))
+		} else {
+			normOwnPaths = append(normOwnPaths, filepath.ToSlash(p))
+		}
+	}
+
+	ownNames := make(map[string]bool)
+	fileByName := make(map[string]*descriptorpb.FileDescriptorProto, len(descSet.File))
+	for _, fp := range descSet.File {
+		name := fp.GetName()
+		fileByName[name] = fp
+		normName := strings.TrimPrefix(filepath.ToSlash(name), "/")
+		for _, own := range normOwnPaths {
+			if own == normName || strings.HasSuffix(own, "/"+normName) {
+				ownNames[name] = true
+				break
+			}
+		}
+	}
+
+	visited := make(map[string]bool)
+	var queue []string
+	for own := range ownNames {
+		visited[own] = true
+		queue = append(queue, own)
+	}
+	for len(queue) > 0 {
+		curr := queue[0]
+		queue = queue[1:]
+		fp := fileByName[curr]
+		if fp == nil {
+			continue
+		}
+		for _, dep := range fp.GetDependency() {
+			if !visited[dep] {
+				visited[dep] = true
+				queue = append(queue, dep)
+			}
+		}
+	}
+
+	var resolved []string
+	for dep := range visited {
+		if ownNames[dep] {
+			continue
+		}
+		norm := strings.TrimPrefix(filepath.ToSlash(dep), "/")
+		if norm == commonResourcesProto || commonProtoDirs[path.Dir(norm)] {
+			continue
+		}
+		for _, inc := range includeDirs {
+			candidate := filepath.Join(inc, filepath.FromSlash(norm))
+			if st, err := os.Stat(candidate); err == nil && !st.IsDir() {
+				resolved = append(resolved, candidate)
+				break
+			}
+		}
+	}
+	return uniqueCanonicalPaths(resolved)
+}
+
+func uniqueCanonicalPaths(paths []string) []string {
+	seen := make(map[string]bool, len(paths))
+	var out []string
+	for _, p := range paths {
+		key := p
+		if abs, err := filepath.EvalSymlinks(p); err == nil {
+			key = abs
+		} else if abs, err := filepath.Abs(p); err == nil {
+			key = abs
+		}
+		if !seen[key] {
+			seen[key] = true
+			out = append(out, p)
+		}
+	}
+	return out
 }
 
 // installGRPCPlugin installs the gRPC-Java protoc plugin declared under

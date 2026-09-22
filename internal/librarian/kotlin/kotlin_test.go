@@ -22,6 +22,8 @@ import (
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/googleapis/librarian/internal/config"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/descriptorpb"
 )
 
 func TestDefaultOutput(t *testing.T) {
@@ -202,3 +204,51 @@ func TestGRPCPluginClassifier(t *testing.T) {
 		t.Errorf("grpcPluginClassifier() = %q, want <os>-<arch>", got)
 	}
 }
+
+func TestResolveNonCommonImportedProtos(t *testing.T) {
+	tmpDir := t.TempDir()
+	includeDir := filepath.Join(tmpDir, "googleapis")
+	primaryProto := filepath.Join(includeDir, "google/cloud/dialogflow/v2/intent.proto")
+	crossImportedProto := filepath.Join(includeDir, "google/cloud/osconfig/v1/osconfig_common.proto")
+	commonProto := filepath.Join(includeDir, "google/api/annotations.proto")
+
+	for _, p := range []string{primaryProto, crossImportedProto, commonProto} {
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("syntax = \"proto3\";"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	fds := &descriptorpb.FileDescriptorSet{
+		File: []*descriptorpb.FileDescriptorProto{
+			{
+				Name: proto.String("google/cloud/dialogflow/v2/intent.proto"),
+				Dependency: []string{
+					"google/cloud/osconfig/v1/osconfig_common.proto",
+					"google/api/annotations.proto",
+					"google/protobuf/timestamp.proto",
+				},
+			},
+			{Name: proto.String("google/cloud/osconfig/v1/osconfig_common.proto")},
+			{Name: proto.String("google/api/annotations.proto")},
+			{Name: proto.String("google/protobuf/timestamp.proto")},
+		},
+	}
+	data, err := proto.Marshal(fds)
+	if err != nil {
+		t.Fatal(err)
+	}
+	descFile := filepath.Join(tmpDir, "descriptor_set.pb")
+	if err := os.WriteFile(descFile, data, 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := resolveNonCommonImportedProtos(descFile, []string{primaryProto}, []string{includeDir})
+	want := []string{crossImportedProto}
+	if diff := cmp.Diff(want, got); diff != "" {
+		t.Errorf("resolveNonCommonImportedProtos() mismatch (-want +got):\n%s", diff)
+	}
+}
+
