@@ -140,6 +140,13 @@ func runGenerate(ctx context.Context, cfg *config.Config, all bool, libraryName 
 		return fmt.Errorf("%w: %q", ErrLibraryNotFound, libraryName)
 	}
 
+	if cfg.Language == config.LanguageKotlin {
+		// The Kotlin generator is built from this repository and its build depends on generated
+		// sources that Clean deletes, so it must be installed before cleaning.
+		if err := kotlin.InstallGenerator(ctx); err != nil {
+			return fmt.Errorf("failed to build generator: %w", err)
+		}
+	}
 	if err := cleanLibraries(cfg.Language, libraries); err != nil {
 		return err
 	}

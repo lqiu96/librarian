@@ -279,9 +279,9 @@ func GenerateLibraries(ctx context.Context, cfg *config.Config, libraries []*con
 		return err
 	}
 
-	generatorBin, err := ensureGeneratorInstalled(ctx)
+	generatorBin, err := generatorBinary()
 	if err != nil {
-		return fmt.Errorf("failed to build generator: %w", err)
+		return err
 	}
 
 	tempDescRoot, err := os.MkdirTemp("", "librarian-kotlin-desc-*")
@@ -729,22 +729,39 @@ func kotlinToolDirs() (string, string, error) {
 	return filepath.Join(installDir, "bin"), filepath.Join(installDir, "lib"), nil
 }
 
-func ensureGeneratorInstalled(ctx context.Context) (string, error) {
-	binPath, err := filepath.Abs(filepath.Join("generator", "build", "install", "generator", "bin", "generator"))
-	if err != nil {
-		return "", err
-	}
+// generatorBinPath is where `gradlew :generator:installDist` installs the generator.
+var generatorBinPath = filepath.Join("generator", "build", "install", "generator", "bin", "generator")
+
+// InstallGenerator builds the Kotlin generator with Gradle.
+//
+// Why it must run before Clean: the generator depends on :gax, which depends on the in-repo
+// :common-java module compiled from the generated clients/common-*/src/main/java sources (the
+// repository is hermetic and does not use the published com.google.api.grpc jars). Clean deletes
+// those sources and every client build.gradle.kts, after which the Gradle build can no longer be
+// configured or compiled. Building first also means a broken generator fails fast, before any
+// output is deleted.
+func InstallGenerator(ctx context.Context) error {
 	gradlew, err := filepath.Abs("gradlew")
 	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(gradlew); err != nil {
+		return nil
+	}
+	if err := command.RunStreaming(ctx, gradlew, ":generator:installDist", "-q"); err != nil {
+		return fmt.Errorf("gradle installDist failed: %w", err)
+	}
+	return nil
+}
+
+// generatorBinary returns the absolute path of the generator installed by InstallGenerator.
+func generatorBinary() (string, error) {
+	binPath, err := filepath.Abs(generatorBinPath)
+	if err != nil {
 		return "", err
 	}
-	if _, err := os.Stat(gradlew); err == nil {
-		if err := command.RunStreaming(ctx, gradlew, ":generator:installDist", "-q"); err != nil {
-			return "", fmt.Errorf("gradle installDist failed: %w", err)
-		}
-	}
 	if _, err := os.Stat(binPath); err != nil {
-		return "", fmt.Errorf("generator binary not found at %s: %w", binPath, err)
+		return "", fmt.Errorf("generator binary not found at %s (InstallGenerator must run first): %w", binPath, err)
 	}
 	return binPath, nil
 }
